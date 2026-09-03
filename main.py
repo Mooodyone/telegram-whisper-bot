@@ -37,7 +37,7 @@ def run_health_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# دالة تحميل الصوت من الروابط
+# دالة تحميل الصوت المطورة لتخطي جدران الحماية والحجب السحابي
 def download_audio(url: str, output_filename="audio.mp3") -> str:
     if os.path.exists(output_filename):
         try:
@@ -45,30 +45,27 @@ def download_audio(url: str, output_filename="audio.mp3") -> str:
         except:
             pass
             
-    # إعدادات متطورة لتجاوز حظر المنصات وتمرير المتصفحات الوهمية
+    # إعدادات قصوى لتخطي حجب السيرفرات ومحاكاة متصفح حقيقي بالكامل
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': 'audio',
         'no_check_certificate': True,
         'geo_bypass': True,
-        'extractor_args': {
-            'tiktok': {
-                'app_version': ['20.2.1'],
-                'manifest_app_version': ['20.2.1']
-            }
-        },
+        'nocheckcertificate': True,
+        'quiet': True,
+        'no_warnings': True,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
         },
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
             'preferredquality': '192',
-        }],
-        'quiet': True,
-        'no_warnings': True,
+        }]
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
@@ -88,7 +85,7 @@ def transcribe_audio(file_path: str) -> str:
 # دالة التلخيص الذكي باستخدام النموذج الجديد المعتمد Llama 3.1
 def summarize_text(text: str) -> str:
     response = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant", # تم التحديث إلى النموذج الجديد والمدعوم حالياً
+        model="llama-3.1-8b-instant",
         messages=[
             {
                 "role": "system",
@@ -125,7 +122,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         loop = asyncio.get_running_loop()
         
-        # المرحلة 1: تحميل ملف الصوت
+        # المرحلة 1: تحميل ملف الصوت واختراق القيود
         audio_file = await loop.run_in_executor(None, download_audio, url)
         
         # المرحلة 2: تحويل الصوت لنص كامل
