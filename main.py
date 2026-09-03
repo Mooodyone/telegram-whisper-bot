@@ -37,7 +37,7 @@ def run_health_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# دالة تحميل الصوت المطورة لتخطي جدران الحماية والحجب السحابي
+# دالة تحميل الصوت المطورة لتخطي جדרان الحماية والحجب السحابي
 def download_audio(url: str, output_filename="audio.mp3") -> str:
     if os.path.exists(output_filename):
         try:
