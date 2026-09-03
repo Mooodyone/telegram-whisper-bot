@@ -74,9 +74,9 @@ def transcribe_audio(file_path: str) -> str:
     return transcription
 
 def summarize_text(text: str) -> str:
-    # استخدام النموذج المعتمد والمستقر حالياً لتجنب توقف التلخيص
+    # التحديث إلى نموذج الإنتاج المستقر والمعتمد حالياً من جروق
     response = groq_client.chat.completions.create(
-        model="llama3-8b-8192",
+        model="qwen/qwen3.6-27b",
         messages=[
             {
                 "role": "system",
@@ -136,7 +136,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     
-    # استخراج الـ user_id الآمن من زر callback المرسل
+    # فك النص البرمي للـ Callback المحدث
     try:
         data_parts = query.data.split("_")
         user_id = int(data_parts[1])
