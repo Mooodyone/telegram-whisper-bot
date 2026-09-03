@@ -20,7 +20,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# قاموس مؤقت في ذاكرة السيرفر لحفظ النصوص المفرغة مؤقتاً لغرض التلخيص
+# قاموس مؤقت في ذاكرة السيرفر لحفظ النصوص لغرض التلخيص
 user_transcriptions = {}
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -89,10 +89,7 @@ def summarize_text(text: str) -> str:
         ],
         temperature=0.3
     )
-    # إصلاح قطعي لقراءة مخرجات Groq بشكل سليم سواء كانت كائناً أو قائمة مدمجة
-    if isinstance(response.choices, list):
-        return response.choices[0].message.content
-    return response.choices.message.content
+    return response.choices[0].message.content
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 أهلاً بك! أرسل لي رابط فيديو وسأقوم بتفريغه لك فوراً، مع خيار التلخيص والحفظ بصيغة Markdown لاحقاً.")
@@ -114,9 +111,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: os.remove(audio_file)
             except: pass
         
-        user_id = update.effective_user.id
+        # حفظ الجلسة باستخدام معرف فريد مبني على اسم المستخدم أو الآي دي الخاص به
+        user_id = str(update.effective_user.id)
         user_transcriptions[user_id] = {"text": text_result, "url": url}
         
+        # ربط الـ Callback بمصفوفة نصية ثابتة ومؤمنة
         keyboard = [[InlineKeyboardButton("📊 تلخيص النص وتحميل ملف MD", callback_data=f"sum_{user_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
                 
@@ -132,24 +131,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status_message.edit_text("❌ عذراً، حدث خطأ أثناء معالجة هذا الرابط. تأكد من صلاحية المقطع.")
+        await status_message.edit_text("❌ عذراً، حدث خطأ أثناء معالجة هذا الرابط. تأكد من صلاحية Mقطع.")
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    try:
-        data_parts = query.data.split("_")
-        user_id = int(data_parts[1]) # إصلاح مصفوفة قراءة المعرف لضمان استخراج الرقم بشكل صحيح
-    except Exception as e:
-        logger.error(f"Parsing error in callback data: {e}")
-        await query.message.reply_text("❌ حدث خطأ في معالجة طلب الزر التفاعلي.")
+    # فك وحماية حزمة المعطيات النصية للـ Callback بشكل آمن ومطلق
+    callback_data = query.data
+    if not callback_data.startswith("sum_"):
         return
+        
+    user_id = callback_data.replace("sum_", "")
     
     if user_id not in user_transcriptions:
         try: await query.edit_message_reply_markup(reply_markup=None)
         except: pass
-        await query.message.reply_text("⚠️ عذراً، انتهت صلاحية الجلسة. يرجى إعادة إرسال الرابط مجدداً.")
+        await query.message.reply_text("⚠️ عذراً، انتهت صلاحية الجلسة في الذاكرة المؤقتة. يرجى إعادة إرسال الرابط مجدداً.")
         return
         
     status_prompt = await query.message.reply_text("🤖 جاري صياغة التلخيص وإنشاء ملف Markdown... انتظر قليلاً.")
@@ -178,7 +176,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.message.reply_document(
                 document=f, 
                 filename="Summary_and_Transcription.md", 
-                caption="✅ تم تجهيز ملف Markdown بنجاح!"
+                caption="✅ تم تجهيز ملف Markdown بنجاح واختصار الأفكار!"
             )
             
         if os.path.exists(md_filename): os.remove(md_filename)
