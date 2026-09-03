@@ -11,13 +11,11 @@ import threading
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# قراءة المفاتيح البيئية
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# خادم وهمي بسيط متوافق تماماً لإبقاء سيرفر ريندر مستيقظاً
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -25,7 +23,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
     def log_message(self, format, *args):
-        return  # إخفاء سجلات الـ HTTP لتنظيف الـ Logs
+        return
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
@@ -38,9 +36,12 @@ def download_audio(url: str, output_filename="audio.mp3") -> str:
             os.remove(output_filename)
         except:
             pass
+            
+    # إعدادات متطورة لدعم الروابط وتجاوز الحظر
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': 'audio',
+        'update_trusted_packages': True, # تحديث الحزم الأمنية تلقائياً
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -97,14 +98,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_message.edit_text("❌ عذراً، حدث خطأ أثناء معالجة هذا الرابط. تأكد من صلاحية المقطع الصوتي.")
 
 def main():
-    # تشغيل الخادم الوهمي في الخلفية
     threading.Thread(target=run_health_server, daemon=True).start()
-    
-    # بناء تطبيق التليجرام بتوافقية أعلى
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
     print("🚀 البوت مستعد ويعمل بنجاح...")
     application.run_polling(close_loop=False)
 
