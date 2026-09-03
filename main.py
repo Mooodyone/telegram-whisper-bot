@@ -20,7 +20,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# قاموس مؤقت لحفظ النصوص المفرغة لغرض التلخيص عند طلب المستخدم
+# قاموس مؤقت في ذاكرة السيرفر لحفظ النصوص المفرغة لغرض التلخيص
 user_transcriptions = {}
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -74,7 +74,7 @@ def transcribe_audio(file_path: str) -> str:
     return transcription
 
 def summarize_text(text: str) -> str:
-    # التحديث لنموذج متاح ومستقر بدلاً من النموذج المحذوف لتجنب خطأ 400 Bad Request
+    # استخدام نموذج مستقر مدعوم
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[
@@ -112,7 +112,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: os.remove(audio_file)
             except: pass
         
-        # حفظ المعطيات البرمجية بشكل مؤمن في السيرفر
+        # حفظ المعطيات النصية البرمجية بشكل مؤمن في السيرفر باستخدام معرف المستخدم
         user_id = str(update.effective_user.id)
         user_transcriptions[user_id] = {"text": text_result, "url": url}
         
@@ -141,6 +141,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if not callback_data.startswith("sum_"):
         return
         
+    # [إصلاح 1]: استخراج الـ user_id النصي بشكل صحيح وآمن وتجنب خطأ الـ List المكسورة
     user_id = callback_data.replace("sum_", "")
     
     if user_id not in user_transcriptions:
