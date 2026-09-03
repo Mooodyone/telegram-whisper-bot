@@ -1,8 +1,10 @@
-import static_ffmpeg
-static_ffmpeg.add_paths()
 import os
 import logging
 import asyncio
+import static_ffmpeg
+# تفعيل مسارات FFmpeg مسبقاً لمنع أي تداخل
+static_ffmpeg.add_paths()
+
 import yt_dlp
 from groq import Groq
 from telegram import Update
@@ -39,11 +41,23 @@ def download_audio(url: str, output_filename="audio.mp3") -> str:
         except:
             pass
             
-    # إعدادات متطورة لدعم الروابط وتجاوز الحظر
+    # إعدادات مخصصة لكسر حماية تيك توك والمواقع المعقدة
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': 'audio',
-        'update_trusted_packages': True, # تحديث الحزم الأمنية تلقائياً
+        'no_check_certificate': True, # تخطي فحص الأمان عند المنع
+        'geo_bypass': True,          # تخطي الحجب الجغرافي
+        'extractor_args': {
+            'tiktok': {
+                'app_version': ['20.2.1'],
+                'manifest_app_version': ['20.2.1']
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+        },
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -97,13 +111,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_message.edit_text(f"📝 **النص المفرغ:**\n\n{text_result}")
     except Exception as e:
         logger.error(f"Error occurred: {e}")
-        await status_message.edit_text("❌ عذراً، حدث خطأ أثناء معالجة هذا الرابط. تأكد من صلاحية المقطع الصوتي.")
+        await status_message.edit_text("❌ عذراً، حدث خطأ أثناء معالجة هذا الرابط. تأكد من صلاحية المقطع الصوتي أو جرب رابط منصة أخرى كـ يوتيوب.")
 
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
     print("🚀 البوت مستعد ويعمل بنجاح...")
     application.run_polling(close_loop=False)
 
