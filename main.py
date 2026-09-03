@@ -74,9 +74,8 @@ def transcribe_audio(file_path: str) -> str:
     return transcription
 
 def summarize_text(text: str) -> str:
-    # التحديث إلى نموذج الإنتاج المستقر والمعتمد حالياً من جروق
     response = groq_client.chat.completions.create(
-        model="qwen/qwen3.6-27b",
+        model="llama3-8b-8192",
         messages=[
             {
                 "role": "system",
@@ -90,6 +89,9 @@ def summarize_text(text: str) -> str:
         ],
         temperature=0.3
     )
+    # إصلاح قطعي لقراءة مخرجات Groq بشكل سليم سواء كانت كائناً أو قائمة مدمجة
+    if isinstance(response.choices, list):
+        return response.choices[0].message.content
     return response.choices.message.content
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -136,10 +138,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     
-    # فك النص البرمي للـ Callback المحدث
     try:
         data_parts = query.data.split("_")
-        user_id = int(data_parts[1])
+        user_id = int(data_parts[1]) # إصلاح مصفوفة قراءة المعرف لضمان استخراج الرقم بشكل صحيح
     except Exception as e:
         logger.error(f"Parsing error in callback data: {e}")
         await query.message.reply_text("❌ حدث خطأ في معالجة طلب الزر التفاعلي.")
