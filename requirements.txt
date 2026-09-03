@@ -1,3 +1,5 @@
 python-telegram-bot==20.8
 groq==0.5.0
 yt-dlp
+ffmpeg-python
+static-ffmpeg
