@@ -8,8 +8,8 @@ static_ffmpeg.add_paths()
 
 import yt_dlp
 from groq import Groq
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 
@@ -20,9 +20,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
-
-# قاموس مؤقت في ذاكرة السيرفر لحفظ النصوص المفرغة لغرض التلخيص
-user_transcriptions = {}
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -98,7 +95,9 @@ def summarize_text(text: str) -> str:
     return response.choices[0].message.content
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 أهلاً بك! أرسل لي رابط فيديو وسأقوم بتفريغه لك فوراً، مع خيار التلخيص والحفظ بصيغة Markdown لاحقاً.")
+    await update.message.reply_text(
+        "👋 أهلاً بك! أرسل لي رابط فيديو وسأرسل لك ملف Markdown يحتوي على الملخص والنص الكامل مباشرة."
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
@@ -109,27 +108,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     status_message = await update.message.reply_text("📥 جاري تحميل المقطع الصوتي وتحويله لنص...")
     audio_file = None
+    md_filename = None
     try:
         loop = asyncio.get_running_loop()
 
+        # 1) تحميل الصوت
         audio_file = await loop.run_in_executor(None, download_audio, url, user_id)
+
+        # 2) تفريغ الصوت إلى نص
         text_result = await loop.run_in_executor(None, transcribe_audio, audio_file)
 
-        # حفظ المعطيات النصية البرمجية بشكل مؤمن في السيرفر باستخدام معرف المستخدم
-        user_transcriptions[user_id] = {"text": text_result, "url": url}
+        # 3) تلخيص النص تلقائياً بدون أي تدخل من المستخدم
+        await status_message.edit_text("🤖 جاري تلخيص النص وتجهيز ملف Markdown...")
+        summary_result = await loop.run_in_executor(None, summarize_text, text_result)
 
-        keyboard = [[InlineKeyboardButton("📊 تلخيص النص وتحميل ملف MD", callback_data=f"sum_{user_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # 4) بناء ملف Markdown: الملخص أولاً، ثم النص الكامل أسفله
+        md_filename = f"Summary_{user_id}_{int(time.time() * 1000)}.md"
+        with open(md_filename, "w", encoding="utf-8") as f:
+            f.write(f"# 📝 تفريغ وتلخيص مقطع مرئي\n\n")
+            f.write(f"**الرابط الأصلي:** {url}\n\n")
+            f.write(f"---\n\n")
+            f.write(f"## 📌 زبدة الكلام (الملخص التنفيذي)\n\n")
+            f.write(f"{summary_result}\n\n")
+            f.write(f"---\n\n")
+            f.write(f"## 📜 النص الكامل المفرغ\n\n")
+            f.write(f"{text_result}\n")
 
-        if len(text_result) > 4000:
-            await status_message.edit_text("✅ تم التفريغ بنجاح! نظراً لطول النص سأرسله على أجزاء:")
-            for i in range(0, len(text_result), 4000):
-                if i + 4000 >= len(text_result):
-                    await update.message.reply_text(text_result[i:i+4000], reply_markup=reply_markup)
-                else:
-                    await update.message.reply_text(text_result[i:i+4000])
-        else:
-            await status_message.edit_text(f"📝 **النص المفرغ:**\n\n{text_result}", reply_markup=reply_markup)
+        # 5) إرسال ملف الـ Markdown مباشرة، بدون أزرار وبدون أي ضغط من المستخدم
+        await status_message.edit_text("✅ تم! هذا ملف التفريغ والتلخيص:")
+        with open(md_filename, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename="Summary_and_Transcription.md",
+                caption="📊 يحتوي الملف على الملخص التنفيذي أعلى الصفحة، والنص الكامل المفرغ أسفله."
+            )
 
     except Exception as e:
         logger.error(f"Error: {e}")
@@ -138,62 +150,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if audio_file and os.path.exists(audio_file):
             try: os.remove(audio_file)
             except: pass
-
-async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    callback_data = query.data
-    if not callback_data.startswith("sum_"):
-        return
-
-    # استخراج الـ user_id النصي بشكل صحيح وآمن وتجنب خطأ الـ List المكسورة
-    user_id = callback_data.replace("sum_", "")
-
-    if user_id not in user_transcriptions:
-        try: await query.edit_message_reply_markup(reply_markup=None)
-        except: pass
-        await query.message.reply_text("⚠️ عذراً، انتهت صلاحية الجلسة في الذاكرة المؤقتة. يرجى إعادة إرسال الرابط مجدداً.")
-        return
-
-    status_prompt = await query.message.reply_text("🤖 جاري صياغة التلخيص وإنشاء ملف Markdown... انتظر قليلاً.")
-
-    try:
-        loop = asyncio.get_running_loop()
-        text_data = user_transcriptions[user_id]["text"]
-        original_url = user_transcriptions[user_id]["url"]
-
-        summary_result = await loop.run_in_executor(None, summarize_text, text_data)
-
-        md_filename = f"Summary_{user_id}.md"
-        with open(md_filename, "w", encoding="utf-8") as f:
-            f.write(f"# 📝 تفريغ وتلخيص مقطع مرئي\n\n")
-            f.write(f"**الرابط الأصلي:** {original_url}\n\n")
-            f.write(f"---\n\n")
-            f.write(f"## 📌 زبدة الكلام (الملخص التنفيذي)\n\n")
-            f.write(f"{summary_result}\n\n")
-            f.write(f"---\n\n")
-            f.write(f"## 📜 النص الكامل المفرغ\n\n")
-            f.write(f"{text_data}\n")
-
-        await status_prompt.edit_text(f"📊 **الملخص التنفيذي:**\n\n{summary_result}")
-
-        with open(md_filename, "rb") as f:
-            await query.message.reply_document(
-                document=f,
-                filename="Summary_and_Transcription.md",
-                caption="✅ تم تجهيز ملف Markdown بنجاح واختصار الأفكار!"
-            )
-
-        if os.path.exists(md_filename): os.remove(md_filename)
-        user_transcriptions.pop(user_id, None)
-
-        try: await query.edit_message_reply_markup(reply_markup=None)
-        except: pass
-
-    except Exception as e:
-        logger.error(f"Callback Error: {e}")
-        await status_prompt.edit_text("❌ حدث خطأ غير متوقع أثناء توليد التلخيص؛ يرجى المحاولة لاحقاً.")
+        if md_filename and os.path.exists(md_filename):
+            try: os.remove(md_filename)
+            except: pass
 
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
@@ -201,7 +160,6 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(handle_callback_query))
 
     print("🚀 البوت المستقر والكامل يعمل بنجاح...")
     application.run_polling(close_loop=False)
