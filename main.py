@@ -1,5 +1,7 @@
 import os
+import re
 import time
+import json
 import logging
 import asyncio
 import static_ffmpeg
@@ -75,8 +77,12 @@ def transcribe_audio(file_path: str) -> str:
         )
     return transcription
 
-def summarize_text(text: str) -> str:
-    # نموذج مستقر مدعوم حالياً (llama-3.1-8b-instant تم إيقافه من Groq بتاريخ 16 أغسطس 2026)
+def summarize_and_title(text: str) -> dict:
+    """
+    يطلب من النموذج تلخيص النص واقتراح عنوان مناسب ومختصر للمحتوى
+    بنفس الاستدعاء (لتوفير الوقت وتقليل عدد الطلبات)، ويرجعهما كقاموس:
+    {"title": "...", "summary": "..."}
+    """
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=[
@@ -84,15 +90,34 @@ def summarize_text(text: str) -> str:
                 "role": "system",
                 "content": (
                     "أنت مساعد محترف وخبير في تلخيص وهيكلة النصوص المفرغة من الصوت. "
-                    "قم بتلخيص النص المرسل إليك باللغة العربية بدقة، واستخرج 'زبدة الكلام' "
-                    "والأفكار والفوائد الرئيسية على شكل نقاط موجزة، منسقة ومنظمة بشكل مريح جداً للقراءة."
+                    "مهمتك: اقرأ النص المرسل إليك (وهو تفريغ صوتي بالعربية)، ثم أرجع "
+                    "النتيجة بصيغة JSON فقط بدون أي نص إضافي، بالشكل التالي بالضبط:\n"
+                    '{"title": "عنوان قصير ومعبّر عن الموضوع الرئيسي (4-8 كلمات، بدون علامات ترقيم زائدة)", '
+                    '"summary": "ملخص زبدة الكلام والأفكار الرئيسية على شكل نقاط موجزة ومنظمة"}\n'
+                    "لا تكتب أي شيء خارج كائن الـ JSON."
                 )
             },
             {"role": "user", "content": text}
         ],
-        temperature=0.3
+        temperature=0.3,
+        response_format={"type": "json_object"},
     )
-    return response.choices[0].message.content
+    raw = response.choices[0].message.content
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = {}
+    return {
+        "title": (data.get("title") or "").strip() or "مقطع بدون عنوان",
+        "summary": (data.get("summary") or "").strip() or raw.strip(),
+    }
+
+
+def sanitize_filename(name: str, max_length: int = 60) -> str:
+    """تنظيف العنوان ليصلح كاسم ملف: إزالة الرموز غير المسموحة والمسافات الزائدة."""
+    name = re.sub(r'[\\/:*?"<>|\n\r\t]', "", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:max_length].strip() or "مقطع_بدون_عنوان"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -118,14 +143,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 2) تفريغ الصوت إلى نص
         text_result = await loop.run_in_executor(None, transcribe_audio, audio_file)
 
-        # 3) تلخيص النص تلقائياً بدون أي تدخل من المستخدم
-        await status_message.edit_text("🤖 جاري تلخيص النص وتجهيز ملف Markdown...")
-        summary_result = await loop.run_in_executor(None, summarize_text, text_result)
+        # 3) تلخيص النص واقتراح عنوان مناسب تلقائياً بدون أي تدخل من المستخدم
+        await status_message.edit_text("🤖 جاري تلخيص النص واقتراح عنوان مناسب...")
+        ai_result = await loop.run_in_executor(None, summarize_and_title, text_result)
+        title = ai_result["title"]
+        summary_result = ai_result["summary"]
 
-        # 4) بناء ملف Markdown: الملخص أولاً، ثم النص الكامل أسفله
-        md_filename = f"Summary_{user_id}_{int(time.time() * 1000)}.md"
+        # 4) بناء اسم ملف واضح: العنوان المقترح + تاريخ ووقت التفريغ
+        now = time.strftime("%Y-%m-%d_%H-%M")
+        safe_title = sanitize_filename(title)
+        md_filename = f"{safe_title}_{now}_{int(time.time() * 1000)}.md"
+        display_filename = f"{safe_title} - {now}.md"
+
         with open(md_filename, "w", encoding="utf-8") as f:
-            f.write(f"# 📝 تفريغ وتلخيص مقطع مرئي\n\n")
+            f.write(f"# 📝 {title}\n\n")
+            f.write(f"**تاريخ التفريغ:** {time.strftime('%Y-%m-%d %H:%M')}\n\n")
             f.write(f"**الرابط الأصلي:** {url}\n\n")
             f.write(f"---\n\n")
             f.write(f"## 📌 زبدة الكلام (الملخص التنفيذي)\n\n")
@@ -139,7 +171,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(md_filename, "rb") as f:
             await update.message.reply_document(
                 document=f,
-                filename="Summary_and_Transcription.md",
+                filename=display_filename,
                 caption="📊 يحتوي الملف على الملخص التنفيذي أعلى الصفحة، والنص الكامل المفرغ أسفله."
             )
 
