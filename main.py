@@ -7,8 +7,8 @@ static_ffmpeg.add_paths()
 
 import yt_dlp
 from groq import Groq
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 
@@ -19,6 +19,9 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
+
+# قاموس مؤقت في ذاكرة السيرفر لحفظ النصوص المفرغة مؤقتاً لغرض التلخيص
+user_transcriptions = {}
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -70,8 +73,26 @@ def transcribe_audio(file_path: str) -> str:
         )
     return transcription
 
+def summarize_text(text: str) -> str:
+    response = groq_client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "أنت مساعد محترف وخبير في تلخيص وهيكلة النصوص المفرغة من الصوت. "
+                    "قم بتلخيص النص المرسل إليك باللغة العربية بدقة، واستخرج 'زبدة الكلام' "
+                    "والأفكار والفوائد الرئيسية على شكل نقاط موجزة، منسقة ومنظمة بشكل مريح جداً للقراءة."
+                )
+            },
+            {"role": "user", "content": text}
+        ],
+        temperature=0.3
+    )
+    return response.choices.message.content
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 أهلاً بك! أرسل لي رابط فيديو وسأقوم بتفريغه لك إلى نص فوراً مجاناً.")
+    await update.message.reply_text("👋 أهلاً بك! أرسل لي رابط فيديو وسأقوم بتفريغه لك فوراً، مع خيار التلخيص والحفظ بصيغة Markdown لاحقاً.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
@@ -83,32 +104,103 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         loop = asyncio.get_running_loop()
         
-        # تحميل وتفريغ مباشر بدون تشتيت السيرفر بالملخصات والملفات
+        # 1. تفريغ النص السريع والمستقر
         audio_file = await loop.run_in_executor(None, download_audio, url)
         text_result = await loop.run_in_executor(None, transcribe_audio, audio_file)
         
         if os.path.exists(audio_file):
             try: os.remove(audio_file)
             except: pass
+        
+        # حفظ النص في الذاكرة المؤقتة برقم رسالة المستخدم للرجوع إليه عند طلب التلخيص
+        user_id = update.effective_user.id
+        user_transcriptions[user_id] = {"text": text_result, "url": url}
+        
+        # إنشاء زر التلخيص التفاعلي
+        keyboard = [[InlineKeyboardButton("📊 تلخيص النص وتحميل ملف MD", callback_data=f"summarize_{user_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
                 
-        # إرسال النص مباشرة للمستخدم
+        # إرسال النص مباشرة للمستخدم مع الزر
         if len(text_result) > 4000:
             await status_message.edit_text("✅ تم التفريغ بنجاح! نظراً لطول النص سأرسله على أجزاء:")
             for i in range(0, len(text_result), 4000):
-                await update.message.reply_text(text_result[i:i+4000])
+                if i + 4000 >= len(text_result): # الجزء الأخير نضع معه زر التلخيص
+                    await update.message.reply_text(text_result[i:i+4000], reply_markup=reply_markup)
+                else:
+                    await update.message.reply_text(text_result[i:i+4000])
         else:
-            await status_message.edit_text(f"📝 **النص المفرغ:**\n\n{text_result}")
+            await status_message.edit_text(f"📝 **النص المفرغ:**\n\n{text_result}", reply_markup=reply_markup)
             
     except Exception as e:
         logger.error(f"Error: {e}")
         await status_message.edit_text("❌ عذراً، حدث خطأ أثناء معالجة هذا الرابط. تأكد من صلاحية المقطع.")
 
+# دالة معالجة ضغط الزر (التلخيص وصنع الملف)
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer() # تنبيه تيليجرام بأن الضغطة استُقبلت
+    
+    user_id = int(query.data.split("_")[1])
+    
+    # التأكد من وجود النص في الذاكرة
+    if user_id not in user_transcriptions:
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text("⚠️ عذراً، انتهت صلاحية الجلسة أو تم مسح النص من ذاكرة السيرفر المؤقتة. يرجى إرسال الرابط مجدداً.")
+        return
+        
+    status_prompt = await query.message.reply_text("🤖 جاري صياغة التلخيص وإنشاء ملف Markdown... انتظر قليلاً.")
+    
+    try:
+        loop = asyncio.get_running_loop()
+        text_data = user_transcriptions[user_id]["text"]
+        original_url = user_transcriptions[user_id]["url"]
+        
+        # تشغيل التلخيص في ثريد منفصل لمنع تجميد البوت
+        summary_result = await loop.run_in_executor(None, summarize_text, text_data)
+        
+        # إنشاء ملف المارك داون (.md)
+        md_filename = f"Summary_{user_id}.md"
+        with open(md_filename, "w", encoding="utf-8") as f:
+            f.write(f"# 📝 تفريغ وتلخيص مقطع مرئي\n\n")
+            f.write(f"**الرابط الأصلي:** {original_url}\n\n")
+            f.write(f"---\n\n")
+            f.write(f"## 📌 زبدة الكلام (الملخص التنفيذي)\n\n")
+            f.write(f"{summary_result}\n\n")
+            f.write(f"---\n\n")
+            f.write(f"## 📜 النص الكامل المفرغ\n\n")
+            f.write(f"{text_data}\n")
+            
+        # إرسال التلخيص النصي وملف المارك داون
+        await status_prompt.edit_text(f"📊 **الملخص التنفيذي:**\n\n{summary_result}")
+        
+        with open(md_filename, "rb") as f:
+            await query.message.reply_document(
+                document=f, 
+                filename="Summary_and_Transcription.md", 
+                caption="✅ تم تجهيز ملف Markdown بنجاح!"
+            )
+            
+        # تنظيف وحذف الملف والذاكرة لتوفير مساحة السيرفر
+        if os.path.exists(md_filename): os.remove(md_filename)
+        user_transcriptions.pop(user_id, None)
+        
+        # إخفاء الزر بعد نجاح العملية لمنع الضغط المتكرر
+        await query.edit_message_reply_markup(reply_markup=None)
+        
+    except Exception as e:
+        logger.error(f"Callback Error: {e}")
+        await status_prompt.edit_text("❌ حدث خطأ غير متوقع أثناء توليد التلخيص.")
+
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("🚀 البوت المستقر يعمل بنجاح...")
+    # معالج ضغطات الأزرار التفاعلية
+    application.add_handler(CallbackQueryHandler(handle_callback_query))
+    
+    print("🚀 البوت الذكي المطور بالأزرار يعمل بنجاح...")
     application.run_polling(close_loop=False)
 
 if __name__ == '__main__':
