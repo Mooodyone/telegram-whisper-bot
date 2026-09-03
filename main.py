@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 import asyncio
 import static_ffmpeg
@@ -37,14 +38,17 @@ def run_health_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-def download_audio(url: str, output_filename="audio.mp3") -> str:
-    if os.path.exists(output_filename):
-        try: os.remove(output_filename)
-        except: pass
-            
+def download_audio(url: str, user_id: str) -> str:
+    """
+    تحميل الصوت مع اسم ملف فريد لكل طلب (مبني على معرف المستخدم + الوقت)
+    لتفادي تعارض الملفات لو أكثر من شخص أرسل رابط بنفس الوقت تقريباً.
+    """
+    base_name = f"audio_{user_id}_{int(time.time() * 1000)}"
+    output_filename = f"{base_name}.mp3"
+
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': 'audio',
+        'outtmpl': base_name,
         'no_check_certificate': True,
         'geo_bypass': True,
         'nocheckcertificate': True,
@@ -68,15 +72,16 @@ def transcribe_audio(file_path: str) -> str:
         transcription = groq_client.audio.transcriptions.create(
             file=(file_path, file.read()),
             model="whisper-large-v3",
+            language="ar",
             response_format="text",
             temperature=0.0
         )
     return transcription
 
 def summarize_text(text: str) -> str:
-    # استخدام نموذج مستقر مدعوم
+    # نموذج مستقر مدعوم حالياً (llama-3.1-8b-instant تم إيقافه من Groq بتاريخ 16 أغسطس 2026)
     response = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="openai/gpt-oss-20b",
         messages=[
             {
                 "role": "system",
@@ -100,25 +105,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not url.startswith("http://") and not url.startswith("https://"):
         await update.message.reply_text("⚠️ من فضلك أرسل رابطاً صحيحاً.")
         return
-        
+
+    user_id = str(update.effective_user.id)
     status_message = await update.message.reply_text("📥 جاري تحميل المقطع الصوتي وتحويله لنص...")
+    audio_file = None
     try:
         loop = asyncio.get_running_loop()
-        
-        audio_file = await loop.run_in_executor(None, download_audio, url)
+
+        audio_file = await loop.run_in_executor(None, download_audio, url, user_id)
         text_result = await loop.run_in_executor(None, transcribe_audio, audio_file)
-        
-        if os.path.exists(audio_file):
-            try: os.remove(audio_file)
-            except: pass
-        
+
         # حفظ المعطيات النصية البرمجية بشكل مؤمن في السيرفر باستخدام معرف المستخدم
-        user_id = str(update.effective_user.id)
         user_transcriptions[user_id] = {"text": text_result, "url": url}
-        
+
         keyboard = [[InlineKeyboardButton("📊 تلخيص النص وتحميل ملف MD", callback_data=f"sum_{user_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-                
+
         if len(text_result) > 4000:
             await status_message.edit_text("✅ تم التفريغ بنجاح! نظراً لطول النص سأرسله على أجزاء:")
             for i in range(0, len(text_result), 4000):
@@ -128,37 +130,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(text_result[i:i+4000])
         else:
             await status_message.edit_text(f"📝 **النص المفرغ:**\n\n{text_result}", reply_markup=reply_markup)
-            
+
     except Exception as e:
         logger.error(f"Error: {e}")
         await status_message.edit_text("❌ عذراً، حدث خطأ أثناء معالجة هذا الرابط. تأكد من صلاحية المقطع.")
+    finally:
+        if audio_file and os.path.exists(audio_file):
+            try: os.remove(audio_file)
+            except: pass
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+
     callback_data = query.data
     if not callback_data.startswith("sum_"):
         return
-        
-    # [إصلاح 1]: استخراج الـ user_id النصي بشكل صحيح وآمن وتجنب خطأ الـ List المكسورة
+
+    # استخراج الـ user_id النصي بشكل صحيح وآمن وتجنب خطأ الـ List المكسورة
     user_id = callback_data.replace("sum_", "")
-    
+
     if user_id not in user_transcriptions:
         try: await query.edit_message_reply_markup(reply_markup=None)
         except: pass
         await query.message.reply_text("⚠️ عذراً، انتهت صلاحية الجلسة في الذاكرة المؤقتة. يرجى إعادة إرسال الرابط مجدداً.")
         return
-        
+
     status_prompt = await query.message.reply_text("🤖 جاري صياغة التلخيص وإنشاء ملف Markdown... انتظر قليلاً.")
-    
+
     try:
         loop = asyncio.get_running_loop()
         text_data = user_transcriptions[user_id]["text"]
         original_url = user_transcriptions[user_id]["url"]
-        
+
         summary_result = await loop.run_in_executor(None, summarize_text, text_data)
-        
+
         md_filename = f"Summary_{user_id}.md"
         with open(md_filename, "w", encoding="utf-8") as f:
             f.write(f"# 📝 تفريغ وتلخيص مقطع مرئي\n\n")
@@ -169,22 +175,22 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             f.write(f"---\n\n")
             f.write(f"## 📜 النص الكامل المفرغ\n\n")
             f.write(f"{text_data}\n")
-            
+
         await status_prompt.edit_text(f"📊 **الملخص التنفيذي:**\n\n{summary_result}")
-        
+
         with open(md_filename, "rb") as f:
             await query.message.reply_document(
-                document=f, 
-                filename="Summary_and_Transcription.md", 
+                document=f,
+                filename="Summary_and_Transcription.md",
                 caption="✅ تم تجهيز ملف Markdown بنجاح واختصار الأفكار!"
             )
-            
+
         if os.path.exists(md_filename): os.remove(md_filename)
         user_transcriptions.pop(user_id, None)
-        
+
         try: await query.edit_message_reply_markup(reply_markup=None)
         except: pass
-        
+
     except Exception as e:
         logger.error(f"Callback Error: {e}")
         await status_prompt.edit_text("❌ حدث خطأ غير متوقع أثناء توليد التلخيص؛ يرجى المحاولة لاحقاً.")
@@ -192,11 +198,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback_query))
-    
+
     print("🚀 البوت المستقر والكامل يعمل بنجاح...")
     application.run_polling(close_loop=False)
 
