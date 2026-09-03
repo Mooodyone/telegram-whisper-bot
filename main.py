@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 import static_ffmpeg
-# تفعيل مسارات FFmpeg مسبقاً لضمان عمل التحميل
+# تفعيل مسارات FFmpeg مسبقاً لضمان عمل التحميل في خوادم ريندر
 static_ffmpeg.add_paths()
 
 import yt_dlp
@@ -20,7 +20,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# قاموس مؤقت في ذاكرة السيرفر لحفظ النصوص لغرض التلخيص
+# قاموس مؤقت لحفظ النصوص المفرغة لغرض التلخيص عند طلب المستخدم
 user_transcriptions = {}
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -74,8 +74,9 @@ def transcribe_audio(file_path: str) -> str:
     return transcription
 
 def summarize_text(text: str) -> str:
+    # التحديث لنموذج متاح ومستقر بدلاً من النموذج المحذوف لتجنب خطأ 400 Bad Request
     response = groq_client.chat.completions.create(
-        model="llama3-8b-8192",
+        model="llama-3.1-8b-instant",
         messages=[
             {
                 "role": "system",
@@ -111,11 +112,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: os.remove(audio_file)
             except: pass
         
-        # حفظ الجلسة باستخدام معرف فريد مبني على اسم المستخدم أو الآي دي الخاص به
+        # حفظ المعطيات البرمجية بشكل مؤمن في السيرفر
         user_id = str(update.effective_user.id)
         user_transcriptions[user_id] = {"text": text_result, "url": url}
         
-        # ربط الـ Callback بمصفوفة نصية ثابتة ومؤمنة
         keyboard = [[InlineKeyboardButton("📊 تلخيص النص وتحميل ملف MD", callback_data=f"sum_{user_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
                 
@@ -131,13 +131,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status_message.edit_text("❌ عذراً، حدث خطأ أثناء معالجة هذا الرابط. تأكد من صلاحية Mقطع.")
+        await status_message.edit_text("❌ عذراً، حدث خطأ أثناء معالجة هذا الرابط. تأكد من صلاحية المقطع.")
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # فك وحماية حزمة المعطيات النصية للـ Callback بشكل آمن ومطلق
     callback_data = query.data
     if not callback_data.startswith("sum_"):
         return
