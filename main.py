@@ -39,8 +39,8 @@ def run_health_server():
 
 def download_audio(url: str, user_id: str) -> str:
     """
-    تحميل الصوت مع اسم ملف فريد لكل طلب (مبني على معرف المستخدم + الوقت)
-    لتفادي تعارض الملفات لو أكثر من شخص أرسل رابط بنفس الوقت تقريباً.
+    تحميل الصوت مع محاكاة عملاء تصفح معقدة (ios و tvhtml5)
+    لتخطي جدار الحماية الصارم من يوتيوب على سيرفرات ريندر.
     """
     base_name = f"audio_{user_id}_{int(time.time() * 1000)}"
     output_filename = f"{base_name}.mp3"
@@ -53,8 +53,18 @@ def download_audio(url: str, user_id: str) -> str:
         'nocheckcertificate': True,
         'quiet': True,
         'no_warnings': True,
+        # الحل القطعي: إجبار yt-dlp على محاكاة تطبيق الآيفون والشاشات الذكية لتفادي الحظر
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'tvhtml5'],
+                'skip': ['dash', 'hls']
+            }
+        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache',
         },
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
@@ -80,8 +90,7 @@ def transcribe_audio(file_path: str) -> str:
 def summarize_and_title(text: str) -> dict:
     """
     يطلب من النموذج تلخيص النص واقتراح عنوان مناسب ومختصر للمحتوى
-    بنفس الاستدعاء (لتوفير الوقت وتقليل عدد الطلبات)، ويرجعهما كقاموس:
-    {"title": "...", "summary": "..."}
+    بصيغة JSON.
     """
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",
@@ -112,16 +121,15 @@ def summarize_and_title(text: str) -> dict:
         "summary": (data.get("summary") or "").strip() or raw.strip(),
     }
 
-
 def sanitize_filename(name: str, max_length: int = 60) -> str:
-    """تنظيف العنوان ليصلح كاسم ملف: إزالة الرموز غير المسموحة والمسافات الزائدة."""
+    """تنظيف العنوان ليصلح كاسم ملف."""
     name = re.sub(r'[\\/:*?"<>|\n\r\t]', "", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name[:max_length].strip() or "مقطع_بدون_عنوان"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 أهلاً بك! أرسل لي رابط فيديو وسأرسل لك ملف Markdown يحتوي على الملخص والنص الكامل مباشرة."
+        "👋 أهلاً بك! أرسل لي رابط فيديو (يوتيوب أو تيك توك) وسأرسل لك ملف Markdown المنسق بالملخص والنص الكامل تلقائياً."
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -143,13 +151,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 2) تفريغ الصوت إلى نص
         text_result = await loop.run_in_executor(None, transcribe_audio, audio_file)
 
-        # 3) تلخيص النص واقتراح عنوان مناسب تلقائياً بدون أي تدخل من المستخدم
+        # 3) تلخيص النص واقتراح عنوان مناسب
         await status_message.edit_text("🤖 جاري تلخيص النص واقتراح عنوان مناسب...")
         ai_result = await loop.run_in_executor(None, summarize_and_title, text_result)
         title = ai_result["title"]
         summary_result = ai_result["summary"]
 
-        # 4) بناء اسم ملف واضح: العنوان المقترح + تاريخ ووقت التفريغ
+        # 4) بناء ملف الـ Markdown
         now = time.strftime("%Y-%m-%d_%H-%M")
         safe_title = sanitize_filename(title)
         md_filename = f"{safe_title}_{now}_{int(time.time() * 1000)}.md"
@@ -166,7 +174,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f.write(f"## 📜 النص الكامل المفرغ\n\n")
             f.write(f"{text_result}\n")
 
-        # 5) إرسال ملف الـ Markdown مباشرة، بدون أزرار وبدون أي ضغط من المستخدم
+        # 5) إرسال ملف الـ Markdown مباشرة
         await status_message.edit_text("✅ تم! هذا ملف التفريغ والتلخيص:")
         with open(md_filename, "rb") as f:
             await update.message.reply_document(
