@@ -62,6 +62,13 @@ def download_audio(url: str, user_id: str) -> str:
             'preferredquality': '192',
         }]
     }
+
+    # محاولة إضافية خاصة بيوتيوب فقط: انتحال تطبيق أندرويد بدل متصفح كمبيوتر
+    # لتفادي فحص "Sign in to confirm you're not a bot" بدون أي كوكيز أو حساب.
+    # هذا لا يمس أي منصة أخرى (تيك توك يبقى بنفس الإعدادات الافتراضية تماماً).
+    if "youtube.com" in url or "youtu.be" in url:
+        ydl_opts['extractor_args'] = {'youtube': {'player_client': ['android']}}
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
     return output_filename
