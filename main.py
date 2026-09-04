@@ -2,7 +2,6 @@ import os
 import re
 import time
 import json
-import shutil
 import logging
 import asyncio
 import static_ffmpeg
@@ -21,26 +20,6 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-
-# مسار ملف كوكيز يوتيوب كما رفعته على Render (Secret File — للقراءة فقط).
-# يُستخدم فقط لروابط يوتيوب — لا علاقة له بتيك توك أو أي منصة أخرى إطلاقاً.
-YOUTUBE_COOKIES_SRC = os.environ.get("YOUTUBE_COOKIES_PATH", "/etc/secrets/youtube_cookies.txt")
-# نسخة قابلة للكتابة داخل مجلد مؤقت، لأن yt-dlp يحاول تحديث ملف الكوكيز بعد
-# كل استخدام، ومجلد Secret Files على Render للقراءة فقط.
-YOUTUBE_COOKIES_WRITABLE = "/tmp/youtube_cookies.txt"
-
-
-def get_youtube_cookiefile():
-    """نسخ ملف الكوكيز إلى مسار قابل للكتابة، وإرجاع مساره (أو None لو غير متوفر)."""
-    if not os.path.exists(YOUTUBE_COOKIES_SRC):
-        return None
-    try:
-        shutil.copy(YOUTUBE_COOKIES_SRC, YOUTUBE_COOKIES_WRITABLE)
-        return YOUTUBE_COOKIES_WRITABLE
-    except Exception as e:
-        logger.warning("فشل نسخ ملف كوكيز يوتيوب: %s", e)
-        return None
-
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -83,18 +62,6 @@ def download_audio(url: str, user_id: str) -> str:
             'preferredquality': '192',
         }]
     }
-
-    # محاولة خاصة بيوتيوب فقط لتفادي فحص "Sign in to confirm you're not a bot".
-    # نستخدم إما الكوكيز الحقيقية (إن وُجدت، وهي الأفضل) أو حيلة انتحال تطبيق
-    # أندرويد كبديل — لكن ليس الاثنين معاً لأن الجمع بينهما يسبب تعارض بصيغ الفيديو.
-    # هذا لا يمس أي منصة أخرى (تيك توك يبقى بنفس الإعدادات الافتراضية تماماً).
-    if "youtube.com" in url or "youtu.be" in url:
-        cookiefile = get_youtube_cookiefile()
-        if cookiefile:
-            ydl_opts['cookiefile'] = cookiefile
-        else:
-            ydl_opts['extractor_args'] = {'youtube': {'player_client': ['android']}}
-            logger.warning("ملف كوكيز يوتيوب غير متوفر — سيتم استخدام حيلة انتحال أندرويد فقط.")
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
