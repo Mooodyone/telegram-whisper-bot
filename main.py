@@ -39,8 +39,7 @@ def run_health_server():
 
 def download_audio(url: str, user_id: str) -> str:
     """
-    تحميل الصوت مع محاكاة عملاء تصفح معقدة (ios و tvhtml5)
-    لتخطي جدار الحماية الصارم من يوتيوب على سيرفرات ريندر.
+    تحميل الصوت مع دمج بروتوكول mweb لتخطي حماية الـ PO Token المفروضة سحابياً.
     """
     base_name = f"audio_{user_id}_{int(time.time() * 1000)}"
     output_filename = f"{base_name}.mp3"
@@ -53,17 +52,17 @@ def download_audio(url: str, user_id: str) -> str:
         'nocheckcertificate': True,
         'quiet': True,
         'no_warnings': True,
-        # الحل القطعي: إجبار yt-dlp على محاكاة تطبيق الآيفون والشاشات الذكية لتفادي الحظر
+        # التحديث البرمجي لحل مشكلة 'Sign in to confirm you’re not a bot'
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'tvhtml5'],
+                'player_client': ['mweb', 'ios'],
                 'skip': ['dash', 'hls']
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Language': 'ar,en-US;q=0.7,en;q=0.3',
             'Cache-Control': 'no-cache',
         },
         'postprocessors': [{
@@ -174,7 +173,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f.write(f"## 📜 النص الكامل المفرغ\n\n")
             f.write(f"{text_result}\n")
 
-        # 5) إرسال ملف الـ Markdown مباشرة
+        # 5) إرسال ملف الـ Markdown مباشرة للمستخدم
         await status_message.edit_text("✅ تم! هذا ملف التفريغ والتلخيص:")
         with open(md_filename, "rb") as f:
             await update.message.reply_document(
