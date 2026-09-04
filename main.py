@@ -39,13 +39,12 @@ def run_health_server():
 
 def download_audio(url: str, user_id: str) -> str:
     """
-    تحميل الصوت الذكي بفصل الإعدادات برمجياً وتحديد الهوية المناسبة لكل منصة
-    تلافياً لحدوث حظر أو تعارض بين يوتيوب وتيك توك.
+    تحميل الصوت مع اسم ملف فريد لكل طلب (مبني على معرف المستخدم + الوقت)
+    لتفادي تعارض الملفات لو أكثر من شخص أرسل رابط بنفس الوقت تقريباً.
     """
     base_name = f"audio_{user_id}_{int(time.time() * 1000)}"
     output_filename = f"{base_name}.mp3"
 
-    # الإعدادات الافتراضية العامة المناسبة لتيك توك وباقي المنصات
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': base_name,
@@ -55,9 +54,7 @@ def download_audio(url: str, user_id: str) -> str:
         'quiet': True,
         'no_warnings': True,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         },
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
@@ -65,22 +62,6 @@ def download_audio(url: str, user_id: str) -> str:
             'preferredquality': '192',
         }]
     }
-
-    # تخصيص بروتوكول كسر الحظر إذا كان الرابط يخص يوتيوب حصراً
-    if "youtube.com" in url or "youtu.be" in url:
-        ydl_opts['extractor_args'] = {
-            'youtube': {
-                'player_client': ['mweb', 'ios'],
-                'skip': ['dash', 'hls']
-            }
-        }
-        ydl_opts['http_headers'] = {
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ar,en-US;q=0.7,en;q=0.3',
-            'Cache-Control': 'no-cache',
-        }
-
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
     return output_filename
@@ -97,6 +78,13 @@ def transcribe_audio(file_path: str) -> str:
     return transcription
 
 def summarize_and_title(text: str) -> dict:
+    """
+    يطلب من النموذج تلخيص النص واقتراح عنوان مناسب ومختصر للمحتوى
+    بنفس الاستدعاء (لتوفير الوقت وتقليل عدد الطلبات)، ويرجعهما كقاموس:
+    {"title": "...", "summary": "..."}
+    لا نعتمد على response_format لأنه يسبب تضارب مع بعض إصدارات مكتبة groq،
+    بل نطلب JSON بالنص ونستخرجه يدوياً بشكل مرن.
+    """
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=[
@@ -105,35 +93,45 @@ def summarize_and_title(text: str) -> dict:
                 "content": (
                     "أنت مساعد محترف وخبير في تلخيص وهيكلة النصوص المفرغة من الصوت. "
                     "مهمتك: اقرأ النص المرسل إليك (وهو تفريغ صوتي بالعربية)، ثم أرجع "
-                    "النتيجة بصيغة JSON فقط بدون أي نص إضافي، بالشكل التالي بالضبط:\n"
+                    "النتيجة بصيغة JSON فقط بدون أي نص إضافي قبله أو بعده، بالشكل التالي بالضبط:\n"
                     '{"title": "عنوان قصير ومعبّر عن الموضوع الرئيسي (4-8 كلمات، بدون علامات ترقيم زائدة)", '
                     '"summary": "ملخص زبدة الكلام والأفكار الرئيسية على شكل نقاط موجزة ومنظمة"}\n'
-                    "لا تكتب أي شيء خارج كائن الـ JSON."
+                    "لا تكتب أي شيء خارج كائن الـ JSON، ولا تستخدم علامات ```."
                 )
             },
             {"role": "user", "content": text}
         ],
         temperature=0.3,
-        response_format={"type": "json_object"},
     )
-    raw = response.choices.message.content
+
+    choice = response.choices[0]
+    # التعامل مع اختلاف شكل الرد بين إصدارات المكتبة (كائن أو قاموس)
+    raw = choice.message.content if hasattr(choice, "message") else choice["message"]["content"]
+
+    # استخراج أول كائن JSON موجود بالنص (حتى لو أحاطه النموذج بنص إضافي بالغلط)
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    json_str = match.group(0) if match else raw
+
     try:
-        data = json.loads(raw)
+        data = json.loads(json_str)
     except Exception:
         data = {}
+
     return {
         "title": (data.get("title") or "").strip() or "مقطع بدون عنوان",
         "summary": (data.get("summary") or "").strip() or raw.strip(),
     }
 
+
 def sanitize_filename(name: str, max_length: int = 60) -> str:
+    """تنظيف العنوان ليصلح كاسم ملف: إزالة الرموز غير المسموحة والمسافات الزائدة."""
     name = re.sub(r'[\\/:*?"<>|\n\r\t]', "", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name[:max_length].strip() or "مقطع_بدون_عنوان"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 أهلاً بك! أرسل لي رابط فيديو (يوتيوب أو تيك توك) وسأرسل لك ملف Markdown المنسق بالملخص والنص الكامل تلقائياً."
+        "👋 أهلاً بك! أرسل لي رابط فيديو وسأرسل لك ملف Markdown يحتوي على الملخص والنص الكامل مباشرة."
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -149,19 +147,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         loop = asyncio.get_running_loop()
 
-        # 1) تحميل الصوت الذكي المنفصل
+        # 1) تحميل الصوت
         audio_file = await loop.run_in_executor(None, download_audio, url, user_id)
 
         # 2) تفريغ الصوت إلى نص
         text_result = await loop.run_in_executor(None, transcribe_audio, audio_file)
 
-        # 3) تلخيص النص واقتراح عنوان مناسب
+        # 3) تلخيص النص واقتراح عنوان مناسب تلقائياً بدون أي تدخل من المستخدم
         await status_message.edit_text("🤖 جاري تلخيص النص واقتراح عنوان مناسب...")
         ai_result = await loop.run_in_executor(None, summarize_and_title, text_result)
         title = ai_result["title"]
         summary_result = ai_result["summary"]
 
-        # 4) بناء ملف الـ Markdown
+        # 4) بناء اسم ملف واضح: العنوان المقترح + تاريخ ووقت التفريغ
         now = time.strftime("%Y-%m-%d_%H-%M")
         safe_title = sanitize_filename(title)
         md_filename = f"{safe_title}_{now}_{int(time.time() * 1000)}.md"
@@ -178,7 +176,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f.write(f"## 📜 النص الكامل المفرغ\n\n")
             f.write(f"{text_result}\n")
 
-        # 5) إرسال ملف الـ Markdown مباشرة للمخدم
+        # 5) إرسال ملف الـ Markdown مباشرة، بدون أزرار وبدون أي ضغط من المستخدم
         await status_message.edit_text("✅ تم! هذا ملف التفريغ والتلخيص:")
         with open(md_filename, "rb") as f:
             await update.message.reply_document(
@@ -206,7 +204,9 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🚀 البوت المستقر والكامل يعمل بنجاح...")
-    application.run_polling(close_loop=False)
+    # drop_pending_updates=True يجعل البوت يتجاهل أي رسائل وصلت أثناء توقفه
+    # ويبدأ فقط بمعالجة الرسائل الجديدة من لحظة إعادة التشغيل.
+    application.run_polling(close_loop=False, drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
