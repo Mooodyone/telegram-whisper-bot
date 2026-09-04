@@ -34,34 +34,29 @@ def run_health_server():
 def extract_youtube_id(url: str) -> str:
     """استخراج معرف الفيديو (Video ID) من أي رابط يوتيوب بدقة"""
     url = url.strip()
-    # مصفوفة الأنماط الشائعة لروابط يوتيوب بما فيها Shorts والجوال
     patterns = [
-        r'(?:v=|\/|embed\/|youtu\.be\/|\/v\/|\/e\/|watch\?v_=|&v=|\/shorts\/)([^#\&\?^\s]*)'
+        r'(?:v=|\/|embed\/|youtu\.be\/|\/v\/|\/e\/|shorts\/)([^#\&\?^\s]{11})'
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
-        if match and len(match.group(1)) == 11:
+        if match:
             return match.group(1)
+    # محاولة إضافية إذا كان المعرف في نهاية الرابط مباشرة
+    if len(url) == 11:
+        return url
     return None
 
 def get_youtube_transcript_api(url: str) -> str:
-    """سحب النص برمجياً عبر الـ API المباشر لتخطي حجب السيرفر وحماية الباقة"""
+    """سحب النص برمجياً عبر الـ API المباشر لتخطي حجب السيرفر وحماية البيانات"""
     video_id = extract_youtube_id(url)
     if not video_id:
         raise Exception("رابط يوتيوب غير صحيح أو تعذر استخراج معرف الفيديو.")
     
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        # [الإصلاح البرمجي القطعي]: استخدام الدالة الصحيحة والمباشرة للمكتبة لجلب قائمة التراجم
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ar', 'en'])
         
-        # محاولة جلب النص باللغة العربية أولاً
-        try:
-            transcript = transcript_list.find_transcript(['ar'])
-        except:
-            # إذا لم تكن العربية متوفرة، جلب النص التلقائي الإنجليزي وترجمته للعربية فوراً
-            transcript = transcript_list.find_transcript(['en']).translate('ar')
-            
-        data = transcript.fetch()
-        full_text = " ".join([item['text'] for item in data])
+        full_text = " ".join([item['text'] for item in transcript_list])
         return full_text.strip()
     except Exception as e:
         logger.error(f"Transcript API Error: {e}")
@@ -129,14 +124,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         loop = asyncio.get_running_loop()
         
-        # [الإصلاح الفوري]: إحكام الفرز الشرطي لتمييز يوتيوب بدقة تامة عن تيك توك وباقي المنصات
+        # إحكام الفرز الشرطي لتمييز يوتيوب بدقة تامة عن تيك توك وباقي المنصات
         is_youtube = any(domain in url.lower() for domain in ["youtube.com", "youtu.be", "youtube"])
         
         if is_youtube:
             await status_message.edit_text("📥 جاري سحب النص التلقائي برمجياً من يوتيوب (اقتصادي)...")
             text_result = await loop.run_in_executor(None, get_youtube_transcript_api, url)
         else:
-            # مقاطع تيك توك والمنصات الأخرى: تعود للتحميل الصوتي الوجيز بنجاح
             await status_message.edit_text("📥 جاري معالجة مقطع تيك توك الخفيف وتحميله...")
             audio_file = await loop.run_in_executor(None, download_audio_light, url, str(update.effective_user.id))
             text_result = await loop.run_in_executor(None, transcribe_audio, audio_file)
@@ -163,7 +157,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error: {e}")
         await status_message.edit_text(
             "❌ تعذر صيد النص تلقائياً.\n"
-            "إذا كان الرابط لـ يوتيوب فتأكد من وجود ترجمة مفعّلة، وإذا كان لـ تيك توك فقد يكون المقطع محذوفاً أو خاصاً."
+            "إذا كان الرابط لـ يوتيوب فتأكد من وجود ترجمة مفعّلة في الفيديو الأصلي."
         )
     finally:
         if audio_file and os.path.exists(audio_file):
