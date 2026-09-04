@@ -41,7 +41,6 @@ def extract_youtube_id(url: str) -> str:
         match = re.search(pattern, url)
         if match:
             return match.group(1)
-    # محاولة إضافية إذا كان المعرف في نهاية الرابط مباشرة
     if len(url) == 11:
         return url
     return None
@@ -53,9 +52,8 @@ def get_youtube_transcript_api(url: str) -> str:
         raise Exception("رابط يوتيوب غير صحيح أو تعذر استخراج معرف الفيديو.")
     
     try:
-        # [الإصلاح البرمجي القطعي]: استخدام الدالة الصحيحة والمباشرة للمكتبة لجلب قائمة التراجم
+        # جلب قائمة التراجم المتوفرة واختيار اللغة المفضلة تلقائياً
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ar', 'en'])
-        
         full_text = " ".join([item['text'] for item in transcript_list])
         return full_text.strip()
     except Exception as e:
@@ -89,22 +87,34 @@ def transcribe_audio(file_path: str) -> str:
             file=(file_path, file.read()), model="whisper-large-v3", language="ar", response_format="text", temperature=0.0
         )
 
-def summarize_and_title(text: str) -> dict:
+def summarize_text_model(text: str) -> dict:
+    """إرسال النص لنموذج الإنتاج المعتمد والمتاح حالياً من جروق لمنع توقف التلخيص"""
     text_input = text[:15000] 
     response = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+        model="llama-3.3-70b-versatile", # تم تثبيت أقوى نموذج مستقر ومدعوم رسمياً من Groq
         messages=[
             {
                 "role": "system",
-                "content": "أرجع النتيجة بصيغة JSON فقط بدون أي مقدمات: {\"title\": \"عنوان البودكاست الأصلي\", \"summary\": \"الملخص التنفيذي المنظم في نقاط ومريح للقراءة\"}"
+                "content": (
+                    "أنت مساعد محترف وخبير في تلخيص وهيكلة النصوص المفرغة من الصوت. "
+                    "مهمتك: اقرأ النص المرسل إليك (وهو تفريغ صوتي بالعربية)، ثم أرجع "
+                    "النتيجة بصيغة JSON فقط بدون أي مقدمات أو نصوص إضافية، بالشكل التالي بالضبط:\n"
+                    '{"title": "عنوان قصير ومعبّر عن الموضوع الرئيسي (4-8 كلمات، بدون علامات ترقيم زائدة)", '
+                    '"summary": "ملخص زبدة الكلام والأفكار الرئيسية على شكل نقاط موجزة ومنظمة ومريحة للقراءة"}\n'
+                    "لا تكتب أي شيء خارج كائن الـ JSON."
+                )
             },
             {"role": "user", "content": text_input}
         ],
         temperature=0.3,
         response_format={"type": "json_object"},
     )
-    try: return json.loads(response.choices.message.content)
-    except: return {"title": "بودكاست مفرغ برمجياً", "summary": response.choices.message.content}
+    
+    raw = response.choices[0].message.content
+    try: 
+        return json.loads(raw)
+    except: 
+        return {"title": "بودكاست مفرغ تلقائياً", "summary": raw.strip()}
 
 def sanitize_filename(name: str, max_length: int = 60) -> str:
     name = re.sub(r'[\\/:*?"<>|\n\r\t]', "", name)
@@ -124,19 +134,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         loop = asyncio.get_running_loop()
         
-        # إحكام الفرز الشرطي لتمييز يوتيوب بدقة تامة عن تيك توك وباقي المنصات
+        # فرز ذكي لحماية المنصات ومعالجتها بشكل مستقل
         is_youtube = any(domain in url.lower() for domain in ["youtube.com", "youtu.be", "youtube"])
         
         if is_youtube:
             await status_message.edit_text("📥 جاري سحب النص التلقائي برمجياً من يوتيوب (اقتصادي)...")
             text_result = await loop.run_in_executor(None, get_youtube_transcript_api, url)
         else:
-            await status_message.edit_text("📥 جاري معالجة مقطع تيك توك الخفيف وتحميله...")
+            await status_message.edit_text("📥 جاري معالجة مقطع تيك توك وتفريغ الصوت...")
             audio_file = await loop.run_in_executor(None, download_audio_light, url, str(update.effective_user.id))
             text_result = await loop.run_in_executor(None, transcribe_audio, audio_file)
             
-        await status_message.edit_text("🤖 جاري تحليل النص وصياغة التلخيص التنفيذي كـ ملف Markdown...")
-        ai_result = await loop.run_in_executor(None, summarize_and_title, text_result)
+        await status_message.edit_text("🤖 جاري قراءة وتحليل المحتوى وصياغة ملف Markdown...")
+        ai_result = await loop.run_in_executor(None, summarize_text_model, text_result)
         title = ai_result["title"]
         summary_result = ai_result["summary"]
         
@@ -146,9 +156,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display_filename = f"{safe_title} - {now}.md"
         
         with open(md_filename, "w", encoding="utf-8") as f:
-            f.write(f"# 📝 {title}\n\n**تاريخ الصيد:** {time.strftime('%Y-%m-%d %H:%M')}\n\n**الرابط:** {url}\n\n---\n\n## 📌 زبدة الكلام\n\n{summary_result}\n\n---\n\n## 📜 النص المستخرج كاملاً\n\n{text_result}")
+            f.write(f"# 📝 {title}\n\n**تاريخ الصيد المعرفي:** {time.strftime('%Y-%m-%d %H:%M')}\n\n**الرابط الأصلي:** {url}\n\n---\n\n## 📌 زبدة الكلام\n\n{summary_result}\n\n---\n\n## 📜 النص الكامل المستخرج\n\n{text_result}")
             
-        await status_message.edit_text("✅ تم اقتناص صيد المعلومة برمجياً واقتصادياً!")
+        await status_message.edit_text("✅ تم اقتناص صيد المعلومة برمجياً واقتصادياً بنجاح!")
         with open(md_filename, "rb") as f:
             await update.message.reply_document(document=f, filename=display_filename)
             
@@ -156,8 +166,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error: {e}")
         await status_message.edit_text(
-            "❌ تعذر صيد النص تلقائياً.\n"
-            "إذا كان الرابط لـ يوتيوب فتأكد من وجود ترجمة مفعّلة في الفيديو الأصلي."
+            "❌ تعذر صيد النص وتلخيصه تلقائياً.\n"
+            "تأكد أن المقطع متاح للعامة ويحتوي على تفريغ نصي مفعّل إذا كان لـ يوتيوب."
         )
     finally:
         if audio_file and os.path.exists(audio_file):
