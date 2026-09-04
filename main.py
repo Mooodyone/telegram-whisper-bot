@@ -88,12 +88,12 @@ def transcribe_audio(file_path: str) -> str:
         )
 
 def summarize_text_model(text: str) -> dict:
-    """إرسال النص لنموذج الإنتاج الفعال والمدعوم حالياً لمنع أخطاء الحذف أو 400 Bad Request"""
+    """إرسال النص للنموذج المستقر والمعتمد حالياً في خطط جروق المجانية لمنع أخطاء 404"""
     text_input = text[:15000] 
     
-    # تصحيح اسم الموديل إلى النموذج الرسمي الفعال في Groq الآن
+    # تصحيح اسم الموديل إلى الموديل المستقر والمتاح للجميع مجاناً الآن في Groq
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile", 
+        model="llama-3.1-8b-instant", 
         messages=[
             {
                 "role": "system",
@@ -112,11 +112,11 @@ def summarize_text_model(text: str) -> dict:
         response_format={"type": "json_object"},
     )
     
-    raw = response.choices[0].message.content
+    raw = response.choices.message.content
     try: 
         return json.loads(raw)
     except: 
-        return {"title": "بودكاست مفرغ تلقائياً", "summary": raw.strip()}
+        return {"title": "مقطع مفرغ تلقائياً", "summary": raw.strip()}
 
 def sanitize_filename(name: str, max_length: int = 60) -> str:
     name = re.sub(r'[\\/:*?"<>|\n\r\t]', "", name)
@@ -136,7 +136,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         loop = asyncio.get_running_loop()
         
-        # فرز ذكي لحماية المنصات ومعالجتها بشكل مستقل
         is_youtube = any(domain in url.lower() for domain in ["youtube.com", "youtu.be", "youtube"])
         
         if is_youtube:
