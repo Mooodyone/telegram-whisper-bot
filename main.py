@@ -32,16 +32,16 @@ def run_health_server():
     server.serve_forever()
 
 def extract_youtube_id(url: str) -> str:
-    """استخراج معرف الفيديو (Video ID) من أي رابط يوتيوب"""
-    pattern = r'(?:v=|\/|embed\/|youtu\.be\/|\/v\/|\/e\/|watch\?v_=|&v=)([^#\&\?]*华?)'
-    match = re.search(pattern, url)
-    if match and len(match.group(1)) == 11:
-        return match.group(1)
-    # محاولة إضافية للروابط المختصرة أو غير التقليدية
-    parsed = re.findall(r'v([^#\&\?]{11})', url)
-    if parsed: return parsed[0]
-    parsed_shorts = re.findall(r'shorts\/([^#\&\?]{11})', url)
-    if parsed_shorts: return parsed_shorts[0]
+    """استخراج معرف الفيديو (Video ID) من أي رابط يوتيوب بدقة"""
+    url = url.strip()
+    # مصفوفة الأنماط الشائعة لروابط يوتيوب بما فيها Shorts والجوال
+    patterns = [
+        r'(?:v=|\/|embed\/|youtu\.be\/|\/v\/|\/e\/|watch\?v_=|&v=|\/shorts\/)([^#\&\?^\s]*)'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match and len(match.group(1)) == 11:
+            return match.group(1)
     return None
 
 def get_youtube_transcript_api(url: str) -> str:
@@ -51,14 +51,13 @@ def get_youtube_transcript_api(url: str) -> str:
         raise Exception("رابط يوتيوب غير صحيح أو تعذر استخراج معرف الفيديو.")
     
     try:
-        # طلب قائمة النصوص المتوفرة للفيديو
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
         # محاولة جلب النص باللغة العربية أولاً
         try:
             transcript = transcript_list.find_transcript(['ar'])
         except:
-            # إذا لم تكن العربية متوفرة، جلب النص التلقائي وترجمته للعربية برمجياً فوراً
+            # إذا لم تكن العربية متوفرة، جلب النص التلقائي الإنجليزي وترجمته للعربية فوراً
             transcript = transcript_list.find_transcript(['en']).translate('ar')
             
         data = transcript.fetch()
@@ -69,13 +68,20 @@ def get_youtube_transcript_api(url: str) -> str:
         raise Exception("تعذر جلب النص التلقائي لهذا الفيديو من خوادم يوتيوب.")
 
 def download_audio_light(url: str, user_id: str) -> str:
+    """تحميل الصوت للمنصات الوجيزة كـ تيك توك لتفادي التأثير عليها وثباتها 100%"""
     base_name = f"audio_{user_id}_{int(time.time())}"
     output_filename = f"{base_name}.mp3"
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': base_name,
+        'no_check_certificate': True,
+        'geo_bypass': True,
+        'nocheckcertificate': True,
         'quiet': True,
         'no_warnings': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        },
         'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '64'}]
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -91,7 +97,7 @@ def transcribe_audio(file_path: str) -> str:
 def summarize_and_title(text: str) -> dict:
     text_input = text[:15000] 
     response = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="openai/gpt-oss-20b",
         messages=[
             {
                 "role": "system",
@@ -111,23 +117,27 @@ def sanitize_filename(name: str, max_length: int = 60) -> str:
     return name[:max_length].strip() or "Podcast_Markdown"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 مرحباً بك! أرسل روابط يوتيوب الطويلة وسأجلب نصوصها وملخصاتها فوراً دون استهلاك باقتك وبحماية كاملة من الحظر.")
+    await update.message.reply_text("👋 مرحباً بك! أرسل روابط يوتيوب الطويلة (اقتصادي بدون تحميل) أو روابط تيك توك وسأجلب ملخصاتها فوراً.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text
+    url = update.message.text.strip()
     if not url.startswith("http"): return
     
-    status_message = await update.message.reply_text("📥 جاري فحص الرابط واستخراج النص الذكي (اقتصادي بدون حظر)...")
+    status_message = await update.message.reply_text("📥 جاري فحص المنصة واستخراج النص ذكياً...")
     audio_file = None
     md_filename = None
     try:
         loop = asyncio.get_running_loop()
         
-        # إذا كان يوتيوب، نستخدم الـ API المباشر لكسر الحظر وتوفير البيانات
-        if "youtube.com" in url or "youtu.be" in url:
+        # [الإصلاح الفوري]: إحكام الفرز الشرطي لتمييز يوتيوب بدقة تامة عن تيك توك وباقي المنصات
+        is_youtube = any(domain in url.lower() for domain in ["youtube.com", "youtu.be", "youtube"])
+        
+        if is_youtube:
+            await status_message.edit_text("📥 جاري سحب النص التلقائي برمجياً من يوتيوب (اقتصادي)...")
             text_result = await loop.run_in_executor(None, get_youtube_transcript_api, url)
         else:
-            # المنصات الأخرى (تيك توك): إذا كانت محظورة في ريندر، يمكنك رفع مقطع الصوت مباشرة للبوت
+            # مقاطع تيك توك والمنصات الأخرى: تعود للتحميل الصوتي الوجيز بنجاح
+            await status_message.edit_text("📥 جاري معالجة مقطع تيك توك الخفيف وتحميله...")
             audio_file = await loop.run_in_executor(None, download_audio_light, url, str(update.effective_user.id))
             text_result = await loop.run_in_executor(None, transcribe_audio, audio_file)
             
@@ -152,8 +162,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error: {e}")
         await status_message.edit_text(
-            "❌ تعذر صيد النص تلقائياً من يوتيوب.\n"
-            "تأكد أن المقطع يحتوي على تفريغ نصي أو ترجمة مفعّلة في موقع يوتيوب."
+            "❌ تعذر صيد النص تلقائياً.\n"
+            "إذا كان الرابط لـ يوتيوب فتأكد من وجود ترجمة مفعّلة، وإذا كان لـ تيك توك فقد يكون المقطع محذوفاً أو خاصاً."
         )
     finally:
         if audio_file and os.path.exists(audio_file):
