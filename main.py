@@ -39,11 +39,13 @@ def run_health_server():
 
 def download_audio(url: str, user_id: str) -> str:
     """
-    تحميل الصوت مع دمج بروتوكول mweb لتخطي حماية الـ PO Token المفروضة سحابياً.
+    تحميل الصوت الذكي بفصل الإعدادات برمجياً وتحديد الهوية المناسبة لكل منصة
+    تلافياً لحدوث حظر أو تعارض بين يوتيوب وتيك توك.
     """
     base_name = f"audio_{user_id}_{int(time.time() * 1000)}"
     output_filename = f"{base_name}.mp3"
 
+    # الإعدادات الافتراضية العامة المناسبة لتيك توك وباقي المنصات
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': base_name,
@@ -52,18 +54,10 @@ def download_audio(url: str, user_id: str) -> str:
         'nocheckcertificate': True,
         'quiet': True,
         'no_warnings': True,
-        # التحديث البرمجي لحل مشكلة 'Sign in to confirm you’re not a bot'
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['mweb', 'ios'],
-                'skip': ['dash', 'hls']
-            }
-        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ar,en-US;q=0.7,en;q=0.3',
-            'Cache-Control': 'no-cache',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
         },
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
@@ -71,6 +65,22 @@ def download_audio(url: str, user_id: str) -> str:
             'preferredquality': '192',
         }]
     }
+
+    # تخصيص بروتوكول كسر الحظر إذا كان الرابط يخص يوتيوب حصراً
+    if "youtube.com" in url or "youtu.be" in url:
+        ydl_opts['extractor_args'] = {
+            'youtube': {
+                'player_client': ['mweb', 'ios'],
+                'skip': ['dash', 'hls']
+            }
+        }
+        ydl_opts['http_headers'] = {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'ar,en-US;q=0.7,en;q=0.3',
+            'Cache-Control': 'no-cache',
+        }
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
     return output_filename
@@ -87,10 +97,6 @@ def transcribe_audio(file_path: str) -> str:
     return transcription
 
 def summarize_and_title(text: str) -> dict:
-    """
-    يطلب من النموذج تلخيص النص واقتراح عنوان مناسب ومختصر للمحتوى
-    بصيغة JSON.
-    """
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=[
@@ -110,7 +116,7 @@ def summarize_and_title(text: str) -> dict:
         temperature=0.3,
         response_format={"type": "json_object"},
     )
-    raw = response.choices[0].message.content
+    raw = response.choices.message.content
     try:
         data = json.loads(raw)
     except Exception:
@@ -121,7 +127,6 @@ def summarize_and_title(text: str) -> dict:
     }
 
 def sanitize_filename(name: str, max_length: int = 60) -> str:
-    """تنظيف العنوان ليصلح كاسم ملف."""
     name = re.sub(r'[\\/:*?"<>|\n\r\t]', "", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name[:max_length].strip() or "مقطع_بدون_عنوان"
@@ -144,7 +149,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         loop = asyncio.get_running_loop()
 
-        # 1) تحميل الصوت
+        # 1) تحميل الصوت الذكي المنفصل
         audio_file = await loop.run_in_executor(None, download_audio, url, user_id)
 
         # 2) تفريغ الصوت إلى نص
@@ -173,7 +178,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f.write(f"## 📜 النص الكامل المفرغ\n\n")
             f.write(f"{text_result}\n")
 
-        # 5) إرسال ملف الـ Markdown مباشرة للمستخدم
+        # 5) إرسال ملف الـ Markdown مباشرة للمخدم
         await status_message.edit_text("✅ تم! هذا ملف التفريغ والتلخيص:")
         with open(md_filename, "rb") as f:
             await update.message.reply_document(
