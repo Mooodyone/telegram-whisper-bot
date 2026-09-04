@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
+# مسار ملف كوكيز يوتيوب (يُرفع كـ Secret File على Render). يُستخدم فقط لروابط
+# يوتيوب — لا علاقة له بتيك توك أو أي منصة أخرى إطلاقاً.
+YOUTUBE_COOKIES_PATH = os.environ.get("YOUTUBE_COOKIES_PATH", "/etc/secrets/youtube_cookies.txt")
+
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -63,11 +67,15 @@ def download_audio(url: str, user_id: str) -> str:
         }]
     }
 
-    # محاولة إضافية خاصة بيوتيوب فقط: انتحال تطبيق أندرويد بدل متصفح كمبيوتر
-    # لتفادي فحص "Sign in to confirm you're not a bot" بدون أي كوكيز أو حساب.
+    # محاولة إضافية خاصة بيوتيوب فقط: انتحال تطبيق أندرويد + استخدام كوكيز حساب
+    # حقيقي (لو متوفر) لتفادي فحص "Sign in to confirm you're not a bot".
     # هذا لا يمس أي منصة أخرى (تيك توك يبقى بنفس الإعدادات الافتراضية تماماً).
     if "youtube.com" in url or "youtu.be" in url:
         ydl_opts['extractor_args'] = {'youtube': {'player_client': ['android']}}
+        if os.path.exists(YOUTUBE_COOKIES_PATH):
+            ydl_opts['cookiefile'] = YOUTUBE_COOKIES_PATH
+        else:
+            logger.warning("ملف كوكيز يوتيوب غير موجود بالمسار %s — سيتم المحاولة بدونه.", YOUTUBE_COOKIES_PATH)
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
