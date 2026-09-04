@@ -11,6 +11,7 @@ from groq import Groq
 from youtube_transcript_api import YouTubeTranscriptApi
 import yt_dlp
 from telegram import Update
+from telegram.error import Conflict, NetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -34,8 +35,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     raise SystemExit("خطأ: المتغيران TELEGRAM_TOKEN و GROQ_API_KEY مطلوبان في بيئة التشغيل.")
 
-# اسم الموديل قابل للتغيير من متغيرات البيئة دون إعادة تعديل الكود.
-# ملاحظة: أوقفت Groq الموديل llama-3.1-8b-instant بتاريخ 2026-08-16.
+# أوقفت Groq الموديل llama-3.1-8b-instant بتاريخ 2026-08-16.
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 GROQ_MODEL_FALLBACKS = [
     "openai/gpt-oss-20b",
@@ -45,9 +45,23 @@ GROQ_MODEL_FALLBACKS = [
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "whisper-large-v3")
 
-# بروكسي اختياري: يوتيوب يحجب عناوين مزودات السحابة (Render / Railway / Fly).
-# مثال: YT_PROXY=http://user:pass@host:port
+# لغات الترجمة المفضلة بالترتيب. اتركه فارغاً لقبول أي لغة متاحة.
+TRANSCRIPT_LANGS = [
+    lang.strip()
+    for lang in os.environ.get("TRANSCRIPT_LANGS", "ar,en").split(",")
+    if lang.strip()
+]
+
+# بروكسي سكني — يوتيوب يحجب عناوين مراكز البيانات (Render / Railway / Fly).
+# الخيار الأول: حساب Webshare.
+WEBSHARE_USER = os.environ.get("WEBSHARE_USER")
+WEBSHARE_PASS = os.environ.get("WEBSHARE_PASS")
+# الخيار الثاني: بروكسي عام، مثال: http://user:pass@host:port
 YT_PROXY = os.environ.get("YT_PROXY")
+
+# السقوط إلى تحميل الصوت وتفريغه إذا فشل سحب الترجمة من يوتيوب.
+# مفيد محلياً، وغالباً بلا فائدة على Render لأن yt-dlp يُحجب أيضاً.
+YT_AUDIO_FALLBACK = os.environ.get("YT_AUDIO_FALLBACK", "0") == "1"
 
 MAX_TEXT_FOR_MODEL = 15000
 MAX_AUDIO_BYTES = 24 * 1024 * 1024  # حد Groq تقريباً 25 ميغابايت
@@ -62,6 +76,16 @@ SUMMARY_SYSTEM_PROMPT = (
     '"summary": "ملخص زبدة الكلام والأفكار الرئيسية على شكل نقاط موجزة ومنظمة"}\n'
     "لا تكتب أي شيء خارج كائن الـ JSON."
 )
+
+# شرح مبسّط لأنواع أخطاء يوتيوب الشائعة
+YT_ERROR_HINTS = {
+    "IpBlocked": "يوتيوب يحجب عنوان هذا الخادم. الحل: بروكسي سكني.",
+    "RequestBlocked": "يوتيوب يحجب عنوان هذا الخادم. الحل: بروكسي سكني.",
+    "TranscriptsDisabled": "صاحب الفيديو عطّل الترجمة النصية.",
+    "NoTranscriptFound": "لا توجد ترجمة باللغات المطلوبة لهذا الفيديو.",
+    "VideoUnavailable": "الفيديو خاص أو محذوف أو محجوب جغرافياً.",
+    "AgeRestricted": "الفيديو مقيّد بالعمر ويتطلب تسجيل دخول.",
+}
 
 
 # ------------------------------------------------- خادم فحص الصحة (Render)
@@ -91,6 +115,22 @@ YOUTUBE_ID_RE = re.compile(
 )
 
 
+class TranscriptError(RuntimeError):
+    """خطأ في جلب الترجمة، يحمل نوع الاستثناء الأصلي للتشخيص."""
+
+    def __init__(self, kind: str, message: str):
+        self.kind = kind
+        super().__init__(message)
+
+
+def safe_remove(path):
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError as e:
+            logger.warning(f"تعذر حذف {path}: {e}")
+
+
 def extract_youtube_id(url: str):
     url = url.strip()
     match = YOUTUBE_ID_RE.search(url)
@@ -104,46 +144,67 @@ def extract_youtube_id(url: str):
 def _build_transcript_api():
     """يدعم الإصدار 1.0+ (كائني) والإصدارات الأقدم (ساكن)."""
     if not hasattr(YouTubeTranscriptApi, "fetch"):
-        return None  # إصدار قديم
+        return None  # إصدار قديم من المكتبة
+
+    if WEBSHARE_USER and WEBSHARE_PASS:
+        try:
+            from youtube_transcript_api.proxies import WebshareProxyConfig
+            logger.info("تفعيل بروكسي Webshare السكني.")
+            return YouTubeTranscriptApi(
+                proxy_config=WebshareProxyConfig(
+                    proxy_username=WEBSHARE_USER,
+                    proxy_password=WEBSHARE_PASS,
+                )
+            )
+        except Exception as e:
+            logger.warning(f"تعذر تفعيل Webshare: {e}")
 
     if YT_PROXY:
         try:
             from youtube_transcript_api.proxies import GenericProxyConfig
+            logger.info("تفعيل البروكسي العام.")
             return YouTubeTranscriptApi(
                 proxy_config=GenericProxyConfig(
                     http_url=YT_PROXY, https_url=YT_PROXY
                 )
             )
         except Exception as e:
-            logger.warning(f"تعذر تفعيل البروكسي، سيتم المتابعة بدونه: {e}")
+            logger.warning(f"تعذر تفعيل البروكسي العام: {e}")
+
     return YouTubeTranscriptApi()
 
 
 def get_youtube_transcript_api(url: str) -> str:
     video_id = extract_youtube_id(url)
     if not video_id:
-        raise ValueError("رابط يوتيوب غير صحيح أو تعذر استخراج معرف الفيديو.")
+        raise TranscriptError("InvalidURL", "رابط يوتيوب غير صحيح أو تعذر استخراج المعرف.")
 
     try:
         api = _build_transcript_api()
         if api is None:
             items = YouTubeTranscriptApi.get_transcript(
-                video_id, languages=["ar", "en"]
+                video_id, languages=TRANSCRIPT_LANGS or ["ar", "en"]
             )
             parts = [item["text"] for item in items]
         else:
-            fetched = api.fetch(video_id, languages=["ar", "en"])
+            if TRANSCRIPT_LANGS:
+                fetched = api.fetch(video_id, languages=TRANSCRIPT_LANGS)
+            else:
+                # أي لغة متاحة
+                listing = api.list(video_id)
+                fetched = next(iter(listing)).fetch()
             parts = [snippet.text for snippet in fetched]
+    except TranscriptError:
+        raise
     except Exception as e:
-        logger.error(f"Transcript API [{video_id}] {type(e).__name__}: {e}")
-        raise RuntimeError(
-            "تعذر جلب النص التلقائي من يوتيوب "
-            "(قد يكون التفريغ معطلاً أو أن عنوان الخادم محجوب)."
-        )
+        kind = type(e).__name__
+        hint = YT_ERROR_HINTS.get(kind, "")
+        logger.error(f"Transcript API [{video_id}] {kind}: {e}")
+        raise TranscriptError(kind, f"تعذر جلب النص من يوتيوب ({kind}). {hint}".strip())
 
     full_text = " ".join(p.strip() for p in parts if p and p.strip())
     if not full_text:
-        raise RuntimeError("التفريغ النصي لهذا الفيديو فارغ.")
+        raise TranscriptError("EmptyTranscript", "التفريغ النصي لهذا الفيديو فارغ.")
     return full_text
 
 
@@ -186,8 +247,12 @@ def download_audio_light(url: str, user_id: str) -> str:
             raise RuntimeError("فشل تحميل الملف الصوتي من المنصة.")
         output_filename = candidates[0]
 
-    if os.path.getsize(output_filename) > MAX_AUDIO_BYTES:
-        raise RuntimeError("حجم المقطع الصوتي كبير جداً على خدمة التفريغ.")
+    size = os.path.getsize(output_filename)
+    if size > MAX_AUDIO_BYTES:
+        safe_remove(output_filename)
+        raise RuntimeError(
+            f"حجم المقطع {size // (1024 * 1024)} ميغابايت — أكبر من حد خدمة التفريغ."
+        )
 
     return output_filename
 
@@ -219,7 +284,7 @@ def _call_groq_chat(model: str, text_input: str) -> str:
         temperature=0.3,
         response_format={"type": "json_object"},
     )
-    # choices قائمة وليست كائناً — الكود السابق كان يرمي AttributeError هنا.
+    # choices قائمة وليست كائناً — الكود الأصلي كان يرمي AttributeError هنا.
     return response.choices[0].message.content or ""
 
 
@@ -268,14 +333,6 @@ def sanitize_filename(name: str, max_length: int = 60) -> str:
     return name[:max_length].strip() or "Podcast_Markdown"
 
 
-def safe_remove(path):
-    if path and os.path.exists(path):
-        try:
-            os.remove(path)
-        except OSError as e:
-            logger.warning(f"تعذر حذف {path}: {e}")
-
-
 # ------------------------------------------------------------ المعالجات
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -297,15 +354,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         loop = asyncio.get_running_loop()
-        is_youtube = any(
-            d in url.lower() for d in ("youtube.com", "youtu.be")
-        )
+        is_youtube = any(d in url.lower() for d in ("youtube.com", "youtu.be"))
 
         if is_youtube:
             await status_message.edit_text("📥 جاري سحب النص التلقائي من يوتيوب...")
-            text_result = await loop.run_in_executor(
-                None, get_youtube_transcript_api, url
-            )
+            try:
+                text_result = await loop.run_in_executor(
+                    None, get_youtube_transcript_api, url
+                )
+            except TranscriptError as te:
+                if not YT_AUDIO_FALLBACK:
+                    raise
+                logger.warning(f"سقوط إلى التفريغ الصوتي بسبب: {te.kind}")
+                await status_message.edit_text(
+                    "🎧 لا توجد ترجمة جاهزة — جاري تحميل الصوت وتفريغه..."
+                )
+                audio_file = await loop.run_in_executor(
+                    None, download_audio_light, url, str(update.effective_user.id)
+                )
+                text_result = await loop.run_in_executor(
+                    None, transcribe_audio, audio_file
+                )
         else:
             await status_message.edit_text("📥 جاري تحميل المقطع وتفريغ الصوت...")
             audio_file = await loop.run_in_executor(
@@ -340,10 +409,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("فشلت معالجة الطلب")
         try:
-            await status_message.edit_text(
-                "❌ تعذر إتمام العملية.\n"
-                f"السبب التقني: {type(e).__name__} — {str(e)[:200]}"
-            )
+            await status_message.edit_text(f"❌ تعذر إتمام العملية.\n{str(e)[:300]}")
         except Exception:
             pass
     finally:
@@ -351,15 +417,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         safe_remove(md_filename)
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    err = context.error
+    if isinstance(err, Conflict):
+        # نسخة أخرى تسحب التحديثات — يحدث عادة أثناء تداخل النشر ويزول وحده.
+        logger.warning("Conflict: نسخة أخرى من البوت تعمل بنفس التوكن.")
+        return
+    if isinstance(err, NetworkError):
+        logger.warning(f"NetworkError مؤقت: {err}")
+        return
+    logger.error("خطأ غير معالج", exc_info=err)
+
+
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
+
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
-    logger.info(f"البوت يعمل — موديل التلخيص: {GROQ_MODEL}")
-    application.run_polling(close_loop=False)
+    application.add_error_handler(error_handler)
+
+    logger.info(
+        f"البوت يعمل — التلخيص: {GROQ_MODEL} | "
+        f"لغات الترجمة: {TRANSCRIPT_LANGS or 'أي لغة'} | "
+        f"بروكسي: {'نعم' if (WEBSHARE_USER or YT_PROXY) else 'لا'}"
+    )
+    application.run_polling(close_loop=False, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
